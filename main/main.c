@@ -1,6 +1,7 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -9,7 +10,7 @@
 #define TASK_OTA_TRIGGER_STACK_SIZE 1024 * 8
 
 bool        ota_trigger_flag = false;
-const char* firmware_version = "v1.0.0";
+const char* firmware_version = "v1.1.0";
 
 extern const uint8_t server_cert_pem_start[] asm("_binary_google_pem_start");
 extern const uint8_t server_cert_pem_end[] asm("_binary_google_pem_end");
@@ -19,14 +20,13 @@ static esp_err_t client_event_handle(esp_http_client_event_t* evt);
 
 void app_main(void)
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
+    const esp_partition_t* esp_partition = esp_ota_get_running_partition();
 
-    ESP_LOGW(__FUNCTION__, "firmware_version = %s", firmware_version);
+    esp_app_desc_t esp_app_description;
+    esp_ota_get_partition_description(esp_partition, &esp_app_description);
+
+    ESP_LOGI(__FUNCTION__, "app version = %s", esp_app_description.version);
+
     xTaskCreate(task_ota_trigger, "task_ota_trigger", TASK_OTA_TRIGGER_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
 }
 
@@ -37,7 +37,14 @@ static void task_ota_trigger(void* pvParameters)
         vTaskDelay(1000);
 
         ota_trigger_flag = true;
-        ESP_LOGW(__FUNCTION__, "ota flag triggered");
+        ESP_LOGW(__FUNCTION__, "ota triggered");
+
+        esp_err_t err = nvs_flash_init();
+        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+        {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            err = nvs_flash_init();
+        }
 
         wifi_init_sta();
 
