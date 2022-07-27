@@ -7,74 +7,91 @@
 #include "nvs_flash.h"
 #include "wifi_station.h"
 #include <stdio.h>
-#define TASK_OTA_TRIGGER_STACK_SIZE 1024 * 8
+#include <string.h>
 
-bool        ota_trigger_flag = false;
 const char* firmware_version = "v1.1.0";
 
 extern const uint8_t server_cert_pem_start[] asm("_binary_google_pem_start");
 extern const uint8_t server_cert_pem_end[] asm("_binary_google_pem_end");
 
-static void      task_ota_trigger(void* pvParameters);
+static void nvs_init(void);
+static void run_ota(void);
+
 static esp_err_t client_event_handle(esp_http_client_event_t* evt);
 
 void app_main(void)
 {
-    const esp_partition_t* esp_partition = esp_ota_get_running_partition();
-
-    esp_app_desc_t esp_app_description;
-    esp_ota_get_partition_description(esp_partition, &esp_app_description);
-
-    ESP_LOGI(__FUNCTION__, "app version = %s", esp_app_description.version);
-
-    xTaskCreate(task_ota_trigger, "task_ota_trigger", TASK_OTA_TRIGGER_STACK_SIZE, NULL, tskIDLE_PRIORITY, NULL);
+    nvs_init();
+    wifi_init_sta();
+    run_ota();
 }
 
-static void task_ota_trigger(void* pvParameters)
+static void run_ota(void)
 {
-    while (1)
+
+    esp_http_client_config_t client_config = {
+        .url               = "https://mq-esp32-ota.s3.amazonaws.com/esp32-ota.bin", // ota locaiton;
+        .event_handler     = client_event_handle,
+        .cert_pem          = (char*)server_cert_pem_start,
+        .timeout_ms        = 20000, // default is 5000
+        .keep_alive_enable = true,
+
+    };
+
+    esp_https_ota_config_t ota_config = {
+        .http_config = &client_config,
+    };
+
+    esp_https_ota_handle_t ota_handle = NULL;
+
+    if (esp_https_ota_begin(&ota_config, &ota_handle) != ESP_OK)
     {
-        vTaskDelay(1000);
-
-        ota_trigger_flag = true;
-        ESP_LOGW(__FUNCTION__, "ota triggered");
-
-        esp_err_t err = nvs_flash_init();
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
-        {
-            ESP_ERROR_CHECK(nvs_flash_erase());
-            err = nvs_flash_init();
-        }
-
-        wifi_init_sta();
-
-        esp_http_client_config_t client_config = {
-            .url               = "https://mq-esp32-ota.s3.amazonaws.com/esp32-ota.bin", // ota locaiton;
-            .event_handler     = client_event_handle,
-            .cert_pem          = (char*)server_cert_pem_start,
-            .timeout_ms        = 20000, // default is 5000
-            .keep_alive_enable = true,
-
-        };
-
-        esp_err_t ota_err = esp_https_ota(&client_config);
-
-        if (ota_err == ESP_OK)
-        {
-            ESP_LOGI(__FUNCTION__, "OTA flash successful for version %s", firmware_version);
-            ESP_LOGI(__FUNCTION__, "reboot in 5 seconds");
-            vTaskDelay(500);
-            esp_restart();
-        }
-
-        ESP_LOGE(__FUNCTION__, "OTA flash not successful for version %s", firmware_version);
-        ESP_ERROR_CHECK(ota_err);
-
-        vTaskDelete(NULL);
+        ESP_LOGE(__FUNCTION__, "fail to find ota file");
+        return;
     }
+
+    // get this app description
+    const esp_partition_t* esp_partition = esp_ota_get_running_partition();
+    esp_app_desc_t         esp_app_description;
+    esp_ota_get_partition_description(esp_partition, &esp_app_description);
+
+    // get ota image app description
+    esp_app_desc_t incoming_esp_app_description;
+    esp_https_ota_get_img_desc(ota_handle, &incoming_esp_app_description);
+
+    // compare both apps description.  download if different;
+    if (strcmp((const char*)&incoming_esp_app_description.version, (const char*)&esp_app_description.version) == 0)
+    {
+        ESP_LOGI(__FUNCTION__, "app version = %s", esp_app_description.version);
+        esp_https_ota_abort(ota_handle);
+        return;
+    }
+
+    ESP_LOGI(__FUNCTION__, "app version = %s, update to new app version = %s", esp_app_description.version,
+             incoming_esp_app_description.version);
+
+    esp_err_t ota_result;
+    do
+    {
+        ota_result = esp_https_ota_perform(ota_handle);
+    } while (ota_result == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
+
+    ESP_ERROR_CHECK(ota_result);
+    ESP_ERROR_CHECK(esp_https_ota_finish(ota_handle));
+    esp_restart();
 }
 
 static esp_err_t client_event_handle(esp_http_client_event_t* evt)
 {
     return ESP_OK;
+}
+
+static void nvs_init(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    }
 }
